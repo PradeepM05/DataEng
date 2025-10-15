@@ -17,7 +17,7 @@ df_mece = df_mece.withColumn("pattern", concat_ws("|", *pattern_parts))
 # Step 2: Get unique patterns
 unique_patterns = df_mece.select("pattern").distinct().collect()
 
-# Step 3: Initialize result with a unique ID for df1
+# Step 3: Initialize result with df1_id
 result = df1.withColumn("df1_id", F.monotonically_increasing_id()) \
             .withColumn("mece_id", lit(None).cast("long"))
 
@@ -30,31 +30,34 @@ for pattern_row in unique_patterns:
     
     non_null_cols = [c for c in pattern.split("|") if c]
     
-    # Get df_mece rows with this pattern
+    # Get df_mece rows with this pattern - only select what we need
     df_mece_pattern = df_mece.filter(col("pattern") == lit(pattern)) \
-                             .select("mece_id", *non_null_cols)
+                             .select(col("mece_id").alias("matched_mece_id"), *non_null_cols)
     
-    # Join df1 with df_mece_pattern
-    joined = result.join(
-        F.broadcast(df_mece_pattern),
+    # Join using aliases to avoid ambiguity
+    joined = result.alias("df1_alias").join(
+        F.broadcast(df_mece_pattern.alias("mece_alias")),
         on=non_null_cols,
         how="inner"
-    )
+    ).select(
+        col("df1_alias.df1_id"),
+        col("mece_alias.matched_mece_id")
+    ).distinct()  # Use distinct to get unique df1_id and mece_id combinations
     
-    # Handle multiple matches - keep first mece_id per df1 row
-    window_spec = Window.partitionBy("df1_id").orderBy("mece_id")
+    # If a df1 row matches multiple mece rows, take the first one
+    window_spec = Window.partitionBy("df1_id").orderBy("matched_mece_id")
     matched = joined.withColumn("rn", F.row_number().over(window_spec)) \
                     .filter(col("rn") == 1) \
-                    .select("df1_id", col("mece_id").alias("new_mece_id"))
+                    .select("df1_id", "matched_mece_id")
     
-    # Update result with new matches (only if mece_id is still null)
-    result = result.join(matched, on="df1_id", how="left") \
+    # Update result - only if mece_id is still null (first match wins)
+    result = result.alias("r").join(matched.alias("m"), on="df1_id", how="left") \
                    .withColumn("mece_id", 
-                              when(col("mece_id").isNull(), col("new_mece_id"))
-                              .otherwise(col("mece_id"))) \
-                   .drop("new_mece_id")
+                              when(col("r.mece_id").isNull(), col("m.matched_mece_id"))
+                              .otherwise(col("r.mece_id"))) \
+                   .select("r.*", "mece_id")
 
-# Step 5: Join to get flu_alignment1 and clean up
+# Step 5: Join to get flu_alignment1
 final_result = result.join(
     df_mece.select("mece_id", "flu_alignment1"),
     on="mece_id",
