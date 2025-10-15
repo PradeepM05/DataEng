@@ -7,61 +7,62 @@ join_cols = ['rznl1_reason', 'rznl2_detail', 'rznl3_additionaldetail',
              'submaltorgmanager3', 'submaltorgmanager4', 'submaltorgmanager5', 
              'submaltorgmanager6', 'assignorg1', 'assignorg2', 'sproductgrp1', 
              'sproductgrp2']
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 
-# Step 1: Add ID to df_mece and create pattern
-df_mece = df_mece.withColumn("mece_id", F.monotonically_increasing_id())
+# Step 1: Add match priority to df2 (count non-null columns)
+common_cols = ['rsnl1_reason', 'rsnl2_detail', 'rsnl3_additionaldetail', 
+               'rsnl4_additionalsubdetail', 'submaltorgmanager1', 'submaltorgmanager2']
 
-pattern_parts = [when(col(c).isNotNull(), lit(c)).otherwise(lit("")) for c in join_cols]
-df_mece = df_mece.withColumn("pattern", concat_ws("|", *pattern_parts))
+# Count non-null values for priority
+df2_with_priority = df2.withColumn(
+    'match_priority',
+    sum([F.when(F.col(c).isNotNull(), 1).otherwise(0) for c in common_cols])
+)
 
-# Step 2: Get unique patterns
-unique_patterns = df_mece.select("pattern").distinct().collect()
+# Step 2: Build dynamic join condition
+# Each column in df2: if null, ignore it; if not null, must match df1
+join_condition = (
+    (df2_with_priority.rsnl1_reason.isNull() | (df1.rsnl1_reason == df2_with_priority.rsnl1_reason)) &
+    (df2_with_priority.rsnl2_detail.isNull() | (df1.rsnl2_detail == df2_with_priority.rsnl2_detail)) &
+    (df2_with_priority.rsnl3_additionaldetail.isNull() | (df1.rsnl3_additionaldetail == df2_with_priority.rsnl3_additionaldetail)) &
+    (df2_with_priority.rsnl4_additionalsubdetail.isNull() | (df1.rsnl4_additionalsubdetail == df2_with_priority.rsnl4_additionalsubdetail)) &
+    (df2_with_priority.submaltorgmanager1.isNull() | (df1.submaltorgmanager1 == df2_with_priority.submaltorgmanager1)) &
+    (df2_with_priority.submaltorgmanager2.isNull() | (df1.submaltorgmanager2 == df2_with_priority.submaltorgmanager2))
+)
 
-# Step 3: Initialize result with df1_id
-result = df1.withColumn("df1_id", F.monotonically_increasing_id()) \
-            .withColumn("mece_id", lit(None).cast("long"))
+# Step 3: Perform left join with broadcast hint (df2 is small)
+joined_df = df1.join(
+    F.broadcast(df2_with_priority),
+    join_condition,
+    'left'
+)
 
-# Step 4: Process each pattern
-for pattern_row in unique_patterns:
-    pattern = pattern_row['pattern']
-    
-    if not pattern:
-        continue
-    
-    non_null_cols = [c for c in pattern.split("|") if c]
-    
-    # Get df_mece rows with this pattern - only select what we need
-    df_mece_pattern = df_mece.filter(col("pattern") == lit(pattern)) \
-                             .select(col("mece_id").alias("matched_mece_id"), *non_null_cols)
-    
-    # Join using aliases to avoid ambiguity
-    joined = result.alias("df1_alias").join(
-        F.broadcast(df_mece_pattern.alias("mece_alias")),
-        on=non_null_cols,
-        how="inner"
-    ).select(
-        col("df1_alias.df1_id"),
-        col("mece_alias.matched_mece_id")
-    ).distinct()  # Use distinct to get unique df1_id and mece_id combinations
-    
-    # If a df1 row matches multiple mece rows, take the first one
-    window_spec = Window.partitionBy("df1_id").orderBy("matched_mece_id")
-    matched = joined.withColumn("rn", F.row_number().over(window_spec)) \
-                    .filter(col("rn") == 1) \
-                    .select("df1_id", "matched_mece_id")
-    
-    # Update result - only if mece_id is still null (first match wins)
-    result = result.alias("r").join(matched.alias("m"), on="df1_id", how="left") \
-                   .withColumn("mece_id", 
-                              when(col("r.mece_id").isNull(), col("m.matched_mece_id"))
-                              .otherwise(col("r.mece_id"))) \
-                   .select("r.*", "mece_id")
+# Step 4: Handle multiple matches - keep the one with highest priority
+# Window spec: partition by df1's unique key, order by priority descending
+windowSpec = Window.partitionBy('cmpinid').orderBy(F.desc('match_priority'))
 
-# Step 5: Join to get flu_alignment1
-final_result = result.join(
-    df_mece.select("mece_id", "flu_alignment1"),
-    on="mece_id",
-    how="left"
-).drop("mece_id", "df1_id")
+# Add row number
+ranked_df = joined_df.withColumn('rank', F.row_number().over(windowSpec))
 
-final_result.show(20, truncate=False)
+# Keep only rank 1 (best match for each df1 row)
+best_matches = ranked_df.filter(F.col('rank') == 1)
+
+# Step 5: Select final columns - all df1 columns + 5 flu_alignment columns
+# Get all original df1 columns
+df1_columns = df1.columns
+
+# Columns to add from df2
+flu_columns = ['flu_alignment1', 'flu_alignment2', 'flu_alignment3', 
+               'flu_alignment4', 'flu_alignment5']
+
+# Final selection
+final_df = best_matches.select(
+    *df1_columns,
+    *flu_columns
+)
+
+# Show results
+final_df.show(20, truncate=False)
+print(f"Final row count: {final_df.count()}")
+print(f"Original df1 row count: {df1.count()}")
