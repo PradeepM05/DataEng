@@ -1,15 +1,18 @@
-flu_columns = ['flu_alignment1', 'flu_alignment2', 'flu_alignment3', 
-               'flu_alignment4', 'flu_alignment5']
-
-# Identify which columns to group by (common columns that will be used for joining)
-# We need to preserve the original structure but aggregate flu values
-df2_aggregated = df2_with_priority.groupBy(
-    *common_cols,
-    'match_priority'
-).agg(
-    F.concat_ws('|', F.collect_set('flu_alignment1')).alias('flu_alignment1'),
-    F.concat_ws('|', F.collect_set('flu_alignment2')).alias('flu_alignment2'),
-    F.concat_ws('|', F.collect_set('flu_alignment3')).alias('flu_alignment3'),
-    F.concat_ws('|', F.collect_set('flu_alignment4')).alias('flu_alignment4'),
-    F.concat_ws('|', F.collect_set('flu_alignment5')).alias('flu_alignment5')
+pythondf_rpt_custint_concerns_exploded = (df_rpt_custint_concerns
+    .withColumn('prd_productgroup1_single', 
+                F.explode(F.transform(F.split(F.trim(F.col('prd_productgroup1')), ','), lambda x: F.trim(x))))
+    .withColumn('prd_productgroup2_single', 
+                F.explode(F.transform(F.split(F.trim(F.col('prd_productgroup2')), ','), lambda x: F.trim(x))))
 )
+
+
+
+
+
+        & (df_mece_flu2.sproductgrp1.isNull() | (df_rpt_custint_concerns_exploded.prd_productgroup1_single == df_mece_flu2.sproductgrp1)) \
+        & (df_mece_flu2.sproductgrp2.isNull() | (df_rpt_custint_concerns_exploded.prd_productgroup2_single == df_mece_flu2.sproductgrp2)) )
+
+
+        # Add the exploded helper columns to the drop list
+join_cols_extended = join_cols + ['prd_productgroup1_single', 'prd_productgroup2_single']
+joined_df = joined_df.drop(*join_cols_extended)
