@@ -8,8 +8,8 @@ SELECT
     COALESCE(org.sublob, 'unavailable') AS submit_sub_flu
 FROM ecr_lh_cdar_cmpl_sec.ecr_rpt_custint_cncrns_d r
 LEFT JOIN ctr_lh_cdar_cmpl_ff_sec.CEXREF_Org org
-    ON ((r.hiercd10dot = CONCAT(org.ItmCD, '[top_level]'))
-        OR (r.hiercd10dot = CONCAT(org.ItmCD, '[equivalent]')))
+    ON (r.hiercd10dot = org.ItmCD 
+        OR SUBSTRING_INDEX(r.hiercd10dot, '.', 1) = org.ItmCD)
     AND org.bActiveFlag = 1
 LEFT JOIN ecr_lh_cdar_cmpl_sec.prd_ads_d_hierarchy_emp_final_emp emp
     ON r.caseown = emp.emp_sid
