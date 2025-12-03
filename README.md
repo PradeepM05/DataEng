@@ -1,40 +1,30 @@
-################# Flu & Sub-Flu Assignment #################
-from pyspark.sql import functions as f
+from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-# Import the table as df
-df_org = spark.table("vctr_lh_cdar_cmpl_ff_sec.cexref_org_table").where(f.col("bactiveflag") == 1)
-hier_codes = df_rpt_custint_concerns.select("hiercd10dot").distinct()
-
-# Combined matching logic with priority
-org_match = (
-    # Exact match (priority 1) and pattern match (priority 2) in single query
-    df_org.alias("org")
-    .join(hier_codes.alias("h"), 
-          (f.col("org.itmcd") == f.col("h.hiercd10dot")) |  # Exact match
-          ((~f.col("org.itmcd").like("%.%")) & 
-           (f.col("h.hiercd10dot").rlike(f.concat(f.lit("^"), f.col("org.itmcd"))))),  # Pattern match
-          "inner")
-    .select(
-        f.when(f.col("org.itmcd") == f.col("h.hiercd10dot"), 1).otherwise(2).alias("seqno"),
-        "org.lob", "org.sublob", "h.hiercd10dot"
-    )
-    .distinct()
-    # Get first match per hiercd10dot
-    .withColumn("rn", f.row_number().over(Window.partitionBy("hiercd10dot").orderBy("seqno")))
-    .where(f.col("rn") == 1)
-    .select("hiercd10dot", "lob", "sublob")
+# 1. Clean sproduct column - remove text in brackets and space before it
+psa_df_cleaned = psa_df.withColumn(
+    'sproduct_cleaned',
+    F.regexp_replace(F.col('sproduct'), r'\s*\[.*?\]', '')
 )
 
-# Assign FLU columns
-flu_cond = (f.col("cdtl_subcmpinid") == 1) & (f.col("cncrn_cncrnid") == 1) & (f.col("caseown") == f.col("creatbynbk"))
+# 2. For CCA rows, keep only the one with max subsystemid
+# First, create a window partitioned by sproductgrp to find max subsystemid for CCA
+window_spec = Window.partitionBy('sproductgrp')
 
-df_rpt_custint_concerns = (
-    df_rpt_custint_concerns
-    .join(org_match, "hiercd10dot", "left")
-    .withColumn("cex_assigned_flu", f.when(flu_cond, f.coalesce("lob", f.lit("unavailable"))))
-    .withColumn("cex_assigned_sub_flu", f.when(flu_cond, f.coalesce("sublob", f.lit("unavailable"))))
-    .withColumn("cex_submit_flu", f.when(flu_cond, f.coalesce("lob", f.lit("unavailable"))))
-    .withColumn("cex_submit_sub_flu", f.when(flu_cond, f.coalesce("sublob", f.lit("unavailable"))))
-    .drop("lob", "sublob")
+psa_df_filtered = psa_df_cleaned.withColumn(
+    'max_subsystemid',
+    F.when(F.col('sproductgrp') == 'CCA', 
+           F.max('subsystemid').over(window_spec))
+    .otherwise(F.col('subsystemid'))
 )
+
+# Keep rows where:
+# - sproductgrp is NOT 'CCA', OR
+# - sproductgrp is 'CCA' AND subsystemid equals max_subsystemid
+psa_df_final = psa_df_filtered.filter(
+    (F.col('sproductgrp') != 'CCA') | 
+    (F.col('subsystemid') == F.col('max_subsystemid'))
+).drop('max_subsystemid')
+
+# Show results
+psa_df_final.orderBy('sproductgrp').show(40, truncate=False)
